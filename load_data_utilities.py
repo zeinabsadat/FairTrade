@@ -21,7 +21,7 @@ def find_potential_outcomes(H, observed_output, sensitive_feature): #H is client
     psm = PsmPy(G, treatment=sensitive_feature, indx='index', exclude = [])
     psm.logistic_ps(balance = True)
     psm.predicted_data
-    psm.knn_matched(matcher='propensity_score', replacement=True, caliper=None)
+    psm.kdtree_matched(matcher='propensity_score', replacement=True, caliper=None)
     
     psm.matched_ids
     psm.predicted_data['propensity_logit']

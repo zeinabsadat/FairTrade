@@ -1,4 +1,8 @@
 
+import torch, numpy as np, random
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
 import torch
 import math
 import argparse
@@ -23,7 +27,6 @@ from sklearn.model_selection import train_test_split
 import numpy as np
 from botorch.models import SingleTaskGP, ModelListGP
 from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
-from botorch.fit import fit_gpytorch_model
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.acquisition import qExpectedImprovement
 from botorch.optim import optimize_acqf
@@ -46,7 +49,7 @@ from botorch.utils.multi_objective.box_decompositions.non_dominated import (
 )
 # Initialize the argument parser
 parser = argparse.ArgumentParser(description="pass the following arguments: dataset_name, number of clients, fairness notion, number of communication rounds.")
-device = torch.device('mps')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 '''
 #logistic regression model
 def create_model(input_dim):
@@ -134,6 +137,16 @@ fairness_notion_list = []
 clients_data,X_test, y_test, sex_list, column_names_list, ytest_potential = load_dataset(url,dataset_name, num_clients, sensitive_feature,distribution_type)
 X_test = X_test.to(device)
 y_test = y_test.to(device)
+
+# --- Task 3: second sensitive attribute (nationality) setup ---
+nat_idx = column_names_list.index('native.country')
+from sklearn.preprocessing import LabelEncoder as _LE
+_nat_encoder = _LE()
+_nat_encoder.fit(pd.read_csv('datasets/adult.csv')['native.country'])
+us_code = float(_nat_encoder.transform(['United-States'])[0])
+nat_list = (X_test[:, nat_idx].cpu().numpy() == us_code).astype(float)
+NAT_WEIGHT = 1.0
+
 global_model = create_model(X_test.shape[1])
 global_model = global_model.to(device)
 
@@ -177,8 +190,11 @@ def evaluate(alpha = 100, lr=0.001, cost_false_negatives=5):
         optimizer1 = optim.Adam(model1.parameters(), lr=lr)
         if fairness_notion == 'stat_parity':
             dp_loss = DemographicParityLoss(alpha=alpha)
+            dp_loss_nat = DemographicParityLoss(alpha=alpha)
         elif fairness_notion == 'ate':
             dp_loss = AverageTreatmentEffectLoss(alpha=alpha)
+            dp_loss_nat = AverageTreatmentEffectLoss(alpha=alpha)
+        nat1_bin = (X1[:, nat_idx] == us_code).float().to(device)
         for epoch in range(epochs):
             criterion = nn.BCEWithLogitsLoss(pos_weight=None)
             # Training on Client 1
@@ -189,8 +205,9 @@ def evaluate(alpha = 100, lr=0.001, cost_false_negatives=5):
             X1_cpu = X1.cpu()
             X1_dataframe = pd.DataFrame(X1_cpu.numpy(), columns=column_names_list)
             y_pred_numpy = y_pred.clone().cpu()
-            fairness_loss = dp_loss(X1, y_pred, s1,y1_potential)
-            fairness_loss = fairness_loss.to(device)
+            fairness_loss_sex = dp_loss(X1, y_pred, s1, y1_potential)
+            fairness_loss_nat = dp_loss_nat(X1, y_pred, nat1_bin, y1_potential)
+            fairness_loss = (fairness_loss_sex + NAT_WEIGHT * fairness_loss_nat).to(device)
             loss = criterion(y_pred.view(-1), y1) + fairness_loss
             loss.backward()
             optimizer1.step()
@@ -214,6 +231,7 @@ def evaluate(alpha = 100, lr=0.001, cost_false_negatives=5):
         y_pred_cls = y_pred.round()
         sensitivity,specificity,bal_acc,G_mean,FN_rate,FP_rate,Precision,f1_sc, acc, auc = all_metrics(y_test.cpu(),y_pred.cpu())
         stat_parity = find_statistical_parity_score(sex_list, y_test,y_pred_cls)
+        stat_parity_nat = find_statistical_parity_score(list(nat_list), y_test, y_pred_cls)
         X_test_cpu = X_test.cpu()
         Xtest_dataframe = pd.DataFrame(X_test_cpu.numpy(), columns=column_names_list)
         y_pred_numpy = y_pred.clone().cpu()
@@ -228,10 +246,12 @@ def evaluate(alpha = 100, lr=0.001, cost_false_negatives=5):
             print("specificity: %s" % specificity)
             print("BalanceACC: %s" % bal_acc)
             print("G_mean: %s" % G_mean)
-            print("statistical parity: %s" % stat_parity)
+            print("statistical parity (sex): %s" % stat_parity)
+            print("statistical parity (nationality): %s" % stat_parity_nat)
             print("ate: %s" % ate)
     if fairness_notion == 'stat_parity':
-        objectives = torch.tensor([[-stat_parity, bal_acc]]) #the two objectives
+        combined_spd = max(abs(stat_parity), abs(stat_parity_nat))
+        objectives = torch.tensor([[-combined_spd, bal_acc]]) #the two objectives
     elif fairness_notion == 'ate':
         objectives = torch.tensor([[-ate, bal_acc]]) #the two objectives
     return objectives
@@ -265,9 +285,9 @@ for round in range(communication_rounds):
 
     #objectives = evaluate(alpha)
     if round == 0:
-        objectives, bal_acc_, fairness_notion_ = evaluate(alpha)
+        objectives = evaluate(alpha)
     else:
-        objectives, bal_acc_, fairness_notion_ = evaluate(updated_alpha, updated_lr)
+        objectives = evaluate(updated_alpha, updated_lr)
     fairness_notion_list.append(objectives[0,0].item())
     bal_acc_list.append(objectives[0,1].item())
     
@@ -333,6 +353,7 @@ for round in range(communication_rounds):
 
 
 global_model.eval()
+torch.save(global_model.state_dict(), "results/adult/global_model_final.pt")
     
 # Average the model parameters (weights and biases) and set the averaged parameters to both models
 with torch.no_grad():
@@ -340,6 +361,7 @@ with torch.no_grad():
         y_pred_cls = y_pred.round()
         sensitivity,specificity,bal_acc,G_mean,FN_rate,FP_rate,Precision,f1_sc, acc, auc = all_metrics(y_test.cpu(),y_pred.cpu())
         stat_parity = find_statistical_parity_score(sex_list, y_test,y_pred_cls)
+        stat_parity_nat = find_statistical_parity_score(list(nat_list), y_test, y_pred_cls)
         X_test_cpu = X_test.cpu()
         Xtest_dataframe = pd.DataFrame(X_test_cpu.numpy(), columns=column_names_list)
         y_pred_numpy = y_pred.clone().cpu()
@@ -352,7 +374,8 @@ with torch.no_grad():
         print("specificity: %s" % specificity)
         print("BalanceACC: %s" % bal_acc)
         print("G_mean: %s" % G_mean)
-        print("statistical parity: %s" % stat_parity)
+        print("statistical parity (sex): %s" % stat_parity)
+        print("statistical parity (nationality): %s" % stat_parity_nat)
         print("ate: %s" % ate)
         
 
