@@ -1,7 +1,10 @@
-scikit-learn
+torch
+numpy
 pandas
+scikit-learn
 gpytorch
 botorch
 cvxopt
 cvxpy
 psmpy
+matplotlib
