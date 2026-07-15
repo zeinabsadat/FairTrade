@@ -143,9 +143,9 @@ nat_idx = column_names_list.index('native.country')
 from sklearn.preprocessing import LabelEncoder as _LE
 _nat_encoder = _LE()
 _nat_encoder.fit(pd.read_csv('datasets/adult.csv')['native.country'])
-us_code = float(_nat_encoder.transform(['United-States'])[0])
-nat_list = (X_test[:, nat_idx].cpu().numpy() == us_code).astype(float)
-NAT_WEIGHT = 1.0
+us_code = float(_nat_encoder.transform(['United-States'])[0]) # deterministic, not dataset-order
+nat_list = (X_test[:, nat_idx].cpu().numpy() == us_code).astype(float) # 1 = US, 0 = Non-US
+NAT_WEIGHT = 1.0 # fixed combination weight for the second fairness term (see Task 3 report)
 
 global_model = create_model(X_test.shape[1])
 global_model = global_model.to(device)
@@ -250,7 +250,7 @@ def evaluate(alpha = 100, lr=0.001, cost_false_negatives=5):
             print("statistical parity (nationality): %s" % stat_parity_nat)
             print("ate: %s" % ate)
     if fairness_notion == 'stat_parity':
-        combined_spd = max(abs(stat_parity), abs(stat_parity_nat))
+        combined_spd = max(abs(stat_parity), abs(stat_parity_nat)) # Task 3: worst-case across both attributes
         objectives = torch.tensor([[-combined_spd, bal_acc]]) #the two objectives
     elif fairness_notion == 'ate':
         objectives = torch.tensor([[-ate, bal_acc]]) #the two objectives
